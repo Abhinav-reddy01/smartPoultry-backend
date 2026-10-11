@@ -9,6 +9,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DriverManager;
 
 @Configuration
 public class DataSourceConfig {
@@ -30,28 +32,51 @@ public class DataSourceConfig {
         String renderEnv = System.getenv("RENDER");
         String explicitUrl = System.getenv("SPRING_DATASOURCE_URL");
 
-        // If running on Render and the user hasn't configured a cloud MySQL URL yet
-        if (renderEnv != null && (explicitUrl == null || explicitUrl.isBlank() || explicitUrl.contains("localhost"))) {
-            log.warn("Detected Render deployment without external cloud database URL! Falling back to embedded H2 database so service stays healthy and live.");
-            DataSourceBuilder<?> builder = DataSourceBuilder.create();
-            builder.driverClassName("org.h2.Driver");
-            builder.url("jdbc:h2:file:./data/poultry_db;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
-            builder.username("sa");
-            builder.password("");
-            return builder.build();
+        String targetUrl = (explicitUrl != null && !explicitUrl.isBlank()) ? explicitUrl.trim() : url.trim();
+        String targetUser = System.getenv("SPRING_DATASOURCE_USERNAME") != null ? System.getenv("SPRING_DATASOURCE_USERNAME").trim() : username.trim();
+        String targetPass = System.getenv("SPRING_DATASOURCE_PASSWORD") != null ? System.getenv("SPRING_DATASOURCE_PASSWORD") : password;
+
+        boolean isPlaceholder = targetUrl.contains("<") || targetUrl.contains(">")
+                || targetUrl.contains("your-cloud") || targetUrl.contains("placeholder")
+                || targetUrl.contains("example.com");
+
+        if (isPlaceholder || (renderEnv != null && targetUrl.contains("localhost"))) {
+            log.warn("Database URL '{}' contains placeholders or localhost on Render. Activating embedded database so service boots cleanly and stays live.", targetUrl);
+            return createH2DataSource();
+        }
+
+        if (targetUrl.startsWith("jdbc:mysql:")) {
+            try {
+                DriverManager.setLoginTimeout(3);
+                try (Connection conn = DriverManager.getConnection(targetUrl, targetUser, targetPass)) {
+                    log.info("Database connection verified successfully.");
+                }
+            } catch (Exception e) {
+                log.error("Unable to connect to MySQL database at '{}': {}. Falling back to embedded database to prevent deployment crash.", targetUrl, e.getMessage());
+                return createH2DataSource();
+            }
         }
 
         DataSourceBuilder<?> builder = DataSourceBuilder.create();
-        builder.url(url);
-        builder.username(username);
-        builder.password(password);
+        builder.url(targetUrl);
+        builder.username(targetUser);
+        builder.password(targetPass);
 
-        if (url.startsWith("jdbc:mysql:")) {
+        if (targetUrl.startsWith("jdbc:mysql:")) {
             builder.driverClassName("com.mysql.cj.jdbc.Driver");
-        } else if (url.startsWith("jdbc:h2:")) {
+        } else if (targetUrl.startsWith("jdbc:h2:")) {
             builder.driverClassName("org.h2.Driver");
         }
 
+        return builder.build();
+    }
+
+    private DataSource createH2DataSource() {
+        DataSourceBuilder<?> builder = DataSourceBuilder.create();
+        builder.driverClassName("org.h2.Driver");
+        builder.url("jdbc:h2:file:./data/poultry_db;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        builder.username("sa");
+        builder.password("");
         return builder.build();
     }
 }
